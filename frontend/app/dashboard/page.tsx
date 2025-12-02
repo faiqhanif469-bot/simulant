@@ -50,6 +50,14 @@ interface TestResults {
   results: AgentResult[];
 }
 
+interface Usage {
+  tests_used: number;
+  tests_limit: number;
+  tests_remaining: number;
+  beta_active: boolean;
+  beta_ends: string;
+}
+
 function ThemeToggle() {
   const [dark, setDark] = useState(true);
   useEffect(() => {
@@ -80,7 +88,6 @@ function SeverityBadge({ severity }: { severity: string }) {
   return <span className={`px-2 py-0.5 rounded text-xs font-medium ${cls[severity] || cls.low}`}>{severity}</span>;
 }
 
-
 export default function Dashboard() {
   const { user } = useUser();
   const [url, setUrl] = useState("");
@@ -92,7 +99,18 @@ export default function Dashboard() {
   const [results, setResults] = useState<TestResults | null>(null);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<"overview" | "bugs">("overview");
+  const [usage, setUsage] = useState<Usage | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Fetch usage on load
+  useEffect(() => {
+    if (user?.id) {
+      fetch(`${API_URL}/usage/${user.id}`)
+        .then(res => res.json())
+        .then(setUsage)
+        .catch(() => {});
+    }
+  }, [user?.id]);
 
   const connectWebSocket = useCallback((id: number) => {
     const ws = new WebSocket(`${API_URL.replace('http', 'ws')}/ws/${id}`);
@@ -117,12 +135,28 @@ export default function Dashboard() {
 
   const toggleAgent = (id: string) => setSelectedAgents(prev => prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]);
 
+  const refreshUsage = useCallback(() => {
+    if (user?.id) {
+      fetch(`${API_URL}/usage/${user.id}`)
+        .then(res => res.json())
+        .then(setUsage)
+        .catch(() => {});
+    }
+  }, [user?.id]);
+
   const startTest = async () => {
     if (!url || selectedAgents.length === 0) return;
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       setError("URL must start with http:// or https://");
       return;
     }
+    
+    // Check if user has tests remaining
+    if (usage && usage.tests_remaining <= 0) {
+      setError("You've used all your free tests. Paid plans coming soon!");
+      return;
+    }
+    
     setIsRunning(true);
     setIsCancelling(false);
     setUpdates([]);
@@ -140,6 +174,7 @@ export default function Dashboard() {
       const data = await res.json();
       setTestId(data.test_id);
       connectWebSocket(data.test_id);
+      refreshUsage();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to start test");
       setIsRunning(false);
@@ -178,7 +213,6 @@ export default function Dashboard() {
     return (order[a.severity] ?? 4) - (order[b.severity] ?? 4);
   });
 
-
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
       {/* Header */}
@@ -192,18 +226,39 @@ export default function Dashboard() {
           </Link>
           <div className="flex items-center gap-3">
             <ThemeToggle />
-            <UserButton afterSignOutUrl="/" />
+            <UserButton />
           </div>
         </div>
       </header>
 
       <main className="max-w-6xl mx-auto px-6 py-8">
-        <div className="mb-8">
-          <h1 className="text-2xl font-semibold mb-1">Test Dashboard</h1>
-          <p style={{ color: 'var(--text-secondary)' }} className="text-sm">Run professional AI testing on any website</p>
+        <div className="mb-8 flex flex-wrap justify-between items-start gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold mb-1">Test Dashboard</h1>
+            <p style={{ color: 'var(--text-secondary)' }} className="text-sm">Run professional AI testing on any website</p>
+          </div>
+          {usage && (
+            <div className="card px-4 py-3 text-sm">
+              <div className="flex items-center gap-3">
+                <div>
+                  <span className="font-semibold">{usage.tests_remaining}</span>
+                  <span style={{ color: 'var(--text-muted)' }}> / {usage.tests_limit} tests left</span>
+                </div>
+                <div className="w-24 h-2 rounded-full" style={{ background: 'var(--bg-tertiary)' }}>
+                  <div 
+                    className="h-full rounded-full bg-green-500" 
+                    style={{ width: `${(usage.tests_remaining / usage.tests_limit) * 100}%` }}
+                  />
+                </div>
+              </div>
+              <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                Beta ends Dec 13, 2024
+              </p>
+            </div>
+          )}
         </div>
 
-        {error && <div className="mb-6 p-4 rounded-lg badge-error text-sm">{error}</div>}
+        {error && <div className="mb-6 p-4 rounded-lg badge-critical text-sm">{error}</div>}
 
         {/* Test Config */}
         <div className="grid lg:grid-cols-3 gap-6 mb-8">
@@ -233,7 +288,7 @@ export default function Dashboard() {
               ) : (
                 <button
                   onClick={startTest}
-                  disabled={!url || selectedAgents.length === 0}
+                  disabled={!url || selectedAgents.length === 0 || (usage && usage.tests_remaining <= 0)}
                   className="btn-primary px-6 py-3 text-sm font-medium flex items-center gap-2 disabled:opacity-50"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" /></svg>
@@ -284,18 +339,15 @@ export default function Dashboard() {
           )}
         </AnimatePresence>
 
-
         {/* Results */}
         {results && stats && (
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-            {/* Status Banner */}
             {results.status === "cancelled" && (
               <div className="mb-6 p-4 rounded-lg badge-warning text-sm">
                 Test was stopped early. Results shown are from completed work.
               </div>
             )}
 
-            {/* Stats */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
               <div className="card p-5 text-center">
                 <div className="text-3xl font-bold">{stats.total_bugs}</div>
@@ -319,7 +371,6 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Tabs */}
             <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
               <div className="flex gap-1 p-1 rounded-lg" style={{ background: 'var(--bg-secondary)' }}>
                 <button onClick={() => setActiveTab("overview")} className={`px-4 py-2 rounded-md text-sm font-medium transition ${activeTab === "overview" ? "bg-white dark:bg-zinc-800 shadow-sm" : ""}`}>Agent Reports</button>
@@ -370,7 +421,6 @@ export default function Dashboard() {
                 ) : (
                   sortedBugs.map((bug, i) => (
                     <div key={i} className="card p-5">
-                      {/* Header */}
                       <div className="flex items-start justify-between gap-4 mb-3">
                         <div className="flex items-start gap-3">
                           <SeverityBadge severity={bug.severity} />
@@ -380,13 +430,9 @@ export default function Dashboard() {
                           {bug.agent}
                         </span>
                       </div>
-                      
-                      {/* Description */}
                       <p className="text-sm leading-relaxed mb-4" style={{ color: 'var(--text-secondary)' }}>
                         {bug.description}
                       </p>
-                      
-                      {/* Impact & Fix */}
                       {(bug.impact || bug.recommendation) && (
                         <div className="space-y-2 pt-3 border-t" style={{ borderColor: 'var(--border)' }}>
                           {bug.impact && (
